@@ -33,7 +33,7 @@ xgb_model <- boost_tree(
   learn_rate = 0.3,
   tree_depth = 2,
   trees = 2
-    
+  
   #-------------------------------------
 ) %>%
   set_engine("xgboost", lambda = 0, params = list(min_child_weight = 0))

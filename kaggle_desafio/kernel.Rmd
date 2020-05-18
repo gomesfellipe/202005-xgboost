@@ -1,0 +1,476 @@
+---
+title: "Untitled"
+author: "MTBR - ModelThinkingBR"
+date: "16/05/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse) # metapackage of all tidyverse packages
+library(tidymodels)
+library(themis) # step smote
+library(DataExplorer)
+
+# número de processadores para paralelizar
+ncores <- 3
+```
+
+# Definição do problema
+
+Descrição obtida do link do datset: [Adult Data Set](http://archive.ics.uci.edu/ml/datasets/Adult)
+
+Resumo: Prever se a renda excede US$50 mil/ano com base nos dados do censo. Também conhecido como conjunto de dados "Renda do Censo".
+
+## Informações do conjunto de dados:
+
+A extração foi feita por Barry Becker do banco de dados do Censo de 1994. Um conjunto de registros razoavelmente limpos foi extraído usando as seguintes condições: ((AAGE> 16) && (AGI> 100) && (AFNLWGT> 1) && (HRSWK> 0))
+
+A tarefa de previsão é determinar se uma pessoa faz mais de 50 mil a ano.
+
+## Informações sobre atributos:
+
+Listagem de atributos (traduzido livremente):
+
+| feature | descrição|
+|--:|--:|
+|idade| contínua|
+|classe de trabalho| Particular, Auto-emp-não-inc, Auto-emp-inc, Federal-gov, Local-gov, State-gov, Sem salário, Nunca trabalhou|
+|fnlwgt| contínuo|
+|educação| Bacharelado, Ensino Médio, 11º, Ensino Médio, Prof-escola, Assoc-acdm, Assoc-voc, 9º, 7º-8º, 12º, Mestrado, 1º-4º, 10º, Doutorado, 5º-6º, Pré-Escola|
+|número da educação| contínuo|
+|Estado civil| cônjuge civil, divorciado, nunca casado, separado, viúvo, cônjuge ausente, cônjuge afetivo|
+|ocupação| Suporte técnico, Reparação de ofícios, Outros serviços, Vendas, Gerenciamento executivo, Especialidade prof, Limpadores de manipuladores, Inspeção de máquinas, Adm-administrativo, Agricultura, Pesca, Movimentação de transportes, Casa particular serviço, serviço protetor, forças armadas|
+Relacionamento| Esposa, Filho próprio, Marido, "Não família", Outro parente, Solteiro|
+|raça| branco, asiático-pac-islander, amer-indian-esquimó, outros, preto|
+|sexo| Feminino, Masculino|
+|ganho de capital| contínuo|
+|perda de capital| contínua|
+|horas por semana| contínua|
+|país de origem| Estados Unidos, Camboja, Inglaterra, Porto Rico, Canadá, Alemanha, Estados Unidos (Guam-USVI-etc), Índia, Japão, Grécia, Sul, China, Cuba, Irã, Honduras, Filipinas, Itália , Polônia, Jamaica, Vietnã, México, Portugal, Irlanda, França, República Dominicana, Laos, Equador, Taiwan, Haiti, Colômbia, Hungria, Guatemala, Nicarágua, Escócia, Tailândia, Iugoslávia, El-Salvador, Trinadad e Tobago, |Peru, Hong , Holanda - Holanda|
+
+# Dados disponíveis
+
+```{r}
+adult <- readr::read_rds("input/adult.rds") %>% 
+  mutate(resposta = factor(resposta, levels = c(">50K", "<=50K")))
+
+adult_val <- readr::read_rds("input/adult_val.rds")
+```
+
+Estrutura geral dos dados:
+
+```{r}
+DataExplorer::plot_intro(adult)
+```
+
+Quantidade parecida de colunas contínuas e discretas semelhante e uma pequena quantidade de dados faltantes.
+
+## Análise exploratória dos dados
+
+Os insights iniciais para a análise exploratória foram obtidos ao examinar o *report* gerado pela função a baixo:
+
+```{r, eval = F}
+DataExplorer::create_report(data = adult, y = "resposta", output_file = " report_before.Rmd")
+```
+
+## Train/Test
+
+Dividindo os dados em 80/20:
+
+```{r}
+set.seed(32)
+spl <- initial_split(adult, prop = 0.8, strata = resposta)
+```
+
+## Préprocessamento com Recipes
+
+```{r}
+adult_recipe <- 
+  recipe(resposta ~ ., training(spl)) %>% 
+  step_mutate(
+    # fix na
+    native_country = case_when(native_country == "United-States" ~ "USA",
+                               TRUE ~ "other"),
+    occupation = case_when(is.na(occupation) ~ "Unemployed",
+                           TRUE ~ as.character(occupation)),
+    workclass = case_when(is.na(workclass) ~ "Unemployed",
+                          TRUE ~ as.character(workclass)),
+    # categorize
+    age = case_when(age <= 25 ~ "young",
+                    age > 25 & age <= 45 ~ "middle-aged",
+                    age > 45 & age <= 65 ~ "senior",
+                    age > 65 ~ "senior"),
+    hours_per_week = case_when(hours_per_week <= 25 ~ "part=time",
+                               hours_per_week > 25 & hours_per_week <= 40 ~ "full-time",
+                               hours_per_week > 40 & hours_per_week <= 60~ "over-time",
+                               hours_per_week > 60 ~ "too-much"),
+    capital_gain = case_when(capital_gain == 0 ~ "none",
+                             capital_gain > 0 & capital_gain < max(capital_gain) ~ " low",
+                             capital_gain == max(capital_gain) ~ "high"),
+    capital_loss = case_when(capital_loss == 0 ~ "none",
+                             capital_loss > 0 & capital_loss < max(capital_loss) ~ " low",
+                             capital_loss == max(capital_loss) ~ "high")
+  ) %>% 
+  step_rm(id, education) %>% 
+  step_YeoJohnson(all_numeric())  %>%
+  step_zv(all_predictors()) #%>% 
+  # step_smote(resposta)
+
+# bake(prep(adult_recipe), adult)
+
+adult_workflow <- workflow() %>% add_recipe(adult_recipe)
+```
+
+## Preparar validacao cruzada
+
+```{r}
+set.seed(42)
+adult_resamples <- vfold_cv(training(spl), v = 5)
+```
+
+
+# Modelos Baseline
+
+Antes de ajustar o modelo XGBoost vejamos como outros modelos se saem:
+
+```{r}
+adult_knn_model <- nearest_neighbor(neighbors = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+adult_tree_model <- decision_tree(min_n = 2, cost_complexity = tune(), tree_depth = 8) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+adult_rf_model <- rand_forest(mtry = tune(), min_n = tune(), trees = 500) %>%
+  set_mode("classification") %>%
+  set_engine("ranger", num.threads = 5)
+
+
+
+adult_knn_workflow <-adult_workflow %>% add_model(adult_knn_model)
+adult_tree_workflow <-adult_workflow %>% add_model(adult_tree_model)
+adult_rf_workflow <-adult_workflow %>% add_model(adult_rf_model)
+```
+
+```{r}
+my_tune_grid <- function(workflow, adult_resamples, grid = 3) {
+  tune_grid(
+    workflow,
+    resamples = adult_resamples,
+    grid = grid,
+    metrics = metric_set(accuracy, precision, recall, roc_auc),
+    control = control_grid(verbose = TRUE, allow_par = TRUE, save_pred = TRUE)
+  )
+}
+```
+
+```{r}
+# ligar processamento paralelo no linux
+doParallel::registerDoParallel(ncores)
+
+tictoc::tic("knn")
+adult_knn_tune_grid <- my_tune_grid(adult_knn_workflow, adult_resamples)
+tictoc::toc()
+
+tictoc::tic("tree")
+adult_tree_tune_grid <- my_tune_grid(adult_tree_workflow, adult_resamples)
+tictoc::toc()
+
+tictoc::tic("rf")
+adult_rf_tune_grid <- my_tune_grid(adult_rf_workflow, adult_resamples)
+tictoc::toc()
+
+doParallel::stopImplicitCluster()
+```
+
+```{r}
+# graficos dos tunes
+autoplot(adult_knn_tune_grid)
+autoplot(adult_tree_tune_grid) + scale_x_log10()
+autoplot(adult_rf_tune_grid)
+```
+
+```{r}
+meu_fit <- function(tune_grid, model, workflow) {
+  adult_best_model <- select_best(tune_grid, "roc_auc")
+  print(adult_best_model)
+  adult_final_model <- finalize_model(model, adult_best_model)
+  adult_workflow <- workflow %>% update_model(adult_final_model)
+  
+  adult_fit <- fit(adult_workflow, data = training(spl))
+  adult_fit
+}
+
+# adult_knn_fit <- meu_fit(adult_knn_tune_grid,adult_knn_model,adult_knn_workflow)
+adult_tree_fit <- meu_fit(adult_tree_tune_grid, adult_tree_model, adult_tree_workflow)
+adult_rf_fit <- meu_fit(adult_rf_tune_grid, adult_rf_model, adult_rf_workflow)
+
+```
+
+
+```{r}
+
+evalue_model <- function(model){
+  
+  predictions <- 
+    model %>%
+    predict(new_data = testing(spl), type = "prob") %>%
+    bind_cols(select(testing(spl), resposta)) %>% 
+    mutate(resposta = as.factor(resposta))
+  
+  cm <- 
+    model %>%
+    predict(new_data = testing(spl)) %>%
+    bind_cols(select(testing(spl), resposta)) %>% 
+    mutate(resposta = as.factor(resposta)) %>% 
+    conf_mat(resposta, .pred_class)
+  
+  metrics <- 
+    cm %>% 
+    summary() %>% 
+    select(-.estimator) %>%
+    filter(.metric %in% c("accuracy", "precision", "recall", "f_meas"))
+  
+  return(list(predictions = predictions, 
+              metrics = metrics))
+}
+
+
+evaue_tree_fit <- evalue_model(model = adult_tree_fit)
+evaue_rf_fit <- evalue_model(model = adult_rf_fit)
+
+
+bind_rows(
+  as_tibble(cbind(model = "tree", evaue_tree_fit$predictions)),
+  as_tibble(cbind(model = "rf", evaue_rf_fit$predictions))
+) %>% 
+  group_by(model) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  mutate(roc = map(data, ~roc_curve(.x, truth = resposta, `.pred_>50K`)),
+         auc = map_dbl(data, ~roc_auc(.x, truth = resposta, `.pred_>50K`) %>% pull(.estimate) %>% round(4)),
+         model = paste0(model, " auc: ", auc)) %>% 
+  select(-data) %>% 
+  unnest(cols = c(roc)) %>% 
+  ggplot() +
+  aes(x = 1 - specificity, y = sensitivity, color = model) +
+  geom_path() +
+  geom_abline(lty = 3)  +
+  labs()
+  annotate(geom = 'label',
+           label = paste("AUC:", auc),
+           x = Inf, y = -Inf, hjust = "inward", vjust = "inward")
+```
+
+
+<!-- rascunho daqui para baixo ainda -->
+
+
+## Preparar para validacao cruzada
+
+```{r, eval = F}
+rspls <- vfold_cv(training(spl), v = 10, strata = resposta)
+```
+
+# Modelagem
+
+## Base line - Regressão logística
+
+```{r}
+
+```
+
+
+```{r}
+logistic_glm <- 
+  logistic_reg(mode = "classification") %>%
+  set_engine("glm") 
+
+wfl <- 
+  workflow() %>% 
+  add_model(logistic_glm) %>% 
+  add_recipe(rec)
+
+model_glm <- wfl %>% fit(training(spl))
+
+predictions_glm <- 
+  model_glm %>%
+  predict(new_data = testing(spl), type = "prob") %>%
+  bind_cols(select(testing(spl), resposta)) %>% 
+  mutate(resposta = as.factor(resposta))
+
+roc_curve(predictions_glm, truth = resposta, `.pred_>50K`) %>% 
+  autoplot()  +
+  annotate(geom = 'label', 
+           label = paste("AUC:", 
+             roc_auc(predictions_glm, truth = resposta, `.pred_>50K`) %>% pull(.estimate) %>% round(4)), 
+           x = Inf, y = -Inf, hjust = "inward", vjust = "inward")
+
+(cm_glm <- 
+    model_glm %>%
+    predict(new_data = testing(spl)) %>%
+    bind_cols(select(testing(spl), resposta)) %>% 
+    mutate(resposta = as.factor(resposta)) %>% 
+    conf_mat(resposta, .pred_class) )
+
+(evalue_glm <- 
+    cm_glm %>% 
+    summary() %>% 
+    select(-.estimator) %>%
+    filter(.metric %in% c("accuracy", "precision", "recall", "f_meas")))
+```
+
+## XGBoost baseline (default)
+
+```{r}
+boost_base <- 
+  boost_tree(
+    # oficial xgboost: https://xgboost.readthedocs.io/en/latest/parameter.html 
+    # de/para parsnip: https://parsnip.tidymodels.org/reference/boost_tree.html
+    trees = 100,        # nrounds
+    learn_rate = 0.3,   # eta
+    # -----------------------------------
+    tree_depth = 6,     # max_depth
+    min_n = 1,          # min_child_weight
+    loss_reduction = 0, # gamma
+    mtry = 1,           # colsample_bytree
+    sample_size = 1     # subsample
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost", lambda = 1, nthread = 4)
+
+wfl <- 
+  workflow() %>% 
+  add_model(boost_base) %>% 
+  add_recipe(rec)
+
+model_xgb_base <- wfl %>% fit(training(spl))
+
+predictions_glm <- 
+  model_glm %>%
+  predict(new_data = testing(spl), type = "prob") %>%
+  bind_cols(select(testing(spl), resposta)) %>% 
+  mutate(resposta = as.factor(resposta))
+
+roc_curve(predictions_glm, truth = resposta, `.pred_>50K`) %>% 
+  autoplot()  +
+  annotate(geom = 'label', 
+           label = paste("AUC:", 
+             roc_auc(predictions_glm, truth = resposta, `.pred_>50K`) %>% pull(.estimate) %>% round(4)), 
+           x = Inf, y = -Inf, hjust = "inward", vjust = "inward")
+
+(cm_glm <- 
+    model_glm %>%
+    predict(new_data = testing(spl)) %>%
+    bind_cols(select(testing(spl), resposta)) %>% 
+    mutate(resposta = as.factor(resposta)) %>% 
+    conf_mat(resposta, .pred_class) )
+
+(evalue_glm <- 
+    cm_glm %>% 
+    summary() %>% 
+    select(-.estimator) %>%
+    filter(.metric %in% c("accuracy", "precision", "recall", "f_meas")))
+
+```
+
+
+
+```{r}
+boost_base <- 
+  boost_tree(
+    # oficial xgboost: https://xgboost.readthedocs.io/en/latest/parameter.html 
+    # de/para parsnip: https://parsnip.tidymodels.org/reference/boost_tree.html
+    
+    # -----------------------------------
+    # Iniciais
+    trees = 100,     # nrounds
+    learn_rate = 0.3,   # eta
+    
+    # Parametros relacionados a arvore
+    tree_depth = 6,     # max_depth
+    min_n = 1,          # min_child_weight
+    
+    # reducao de perda
+    loss_reduction = 0, # gamma
+    
+    # parametro de amostragem
+    mtry = 1,           # colsample_bytree
+    sample_size = 1     # subsample
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost", lambda = 1, nthread = 4)
+
+wfl <- 
+  workflow() %>% 
+    add_model(boost_base) %>% 
+    add_recipe(rec)
+
+tun <- 
+  wfl %>% 
+    tune_grid(
+     resamples = rspls,
+     control = control_grid(save_pred = TRUE, verbose = TRUE),
+     metrics = metric_set(roc_auc)
+    )
+
+autoplot(tun)
+
+tun %>% show_best(metric = "roc_auc", n = 1)
+
+tun$.predictions[[1]] %>% View()
+
+tun$.predictions
+
+best_lr <- tun %>% 
+  select_best(metric = "roc_auc")
+
+best_lr
+
+```
+
+
+
+```{r}
+
+
+
+
+boost <- 
+  boost_tree(
+    learn_rate = tune(),
+    trees = tune()
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost", nthread = 4)
+
+wfl <- workflow() %>% 
+    add_model(boost) %>% 
+    add_recipe(rec)
+
+tun <- 
+  wfl %>% 
+    tune_grid(
+     resamples = rspls,
+     control = control_grid(save_pred = TRUE, verbose = TRUE),
+     metrics = metric_set(roc_auc)
+    )
+
+autoplot(tun)
+
+tun %>% 
+  show_best(metric = "roc_auc", n = 3)
+
+tun$.predictions[[1]] %>% View()
+
+best_lr <- tun %>% 
+  select_best(metric = "roc_auc")
+
+best_lr
+
+
+```
+
