@@ -1,0 +1,302 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 11, warning = F, error = F, message = F)
+
+library(tidyverse) # metapackage of all tidyverse packages
+library(tidymodels)
+library(themis) # step smote
+library(DataExplorer)
+library(vip)
+
+# número de processadores para paralelizar
+ncores <- 4
+```
+
+# Leitura dos dados
+
+```{r}
+adult <- readr::read_rds("input/adult.rds")
+
+adult
+```
+
+# Separar em treino e teste:
+
+```{r}
+set.seed(32)
+adult_split <- initial_split(adult, prop = 0.8, strata = resposta)
+
+adult_train <- training(adult_split)
+adult_test <- testing(adult_split)
+```
+
+# Pre-processamento
+
+```{r}
+adult_recipe <- 
+  recipe(resposta ~ ., adult_train)%>% 
+  step_mutate(
+    # fix na
+    native_country = case_when(native_country == "United-States" ~ "USA",
+                               TRUE ~ "other"),
+    occupation = case_when(is.na(occupation) ~ "Unemployed",
+                           TRUE ~ as.character(occupation)),
+    workclass = case_when(is.na(workclass) ~ "Unemployed",
+                          TRUE ~ as.character(workclass)),
+    # categorize
+    age = case_when(age <= 25 ~ "young",
+                    age > 25 & age <= 45 ~ "middle-aged",
+                    age > 45 & age <= 65 ~ "senior",
+                    age > 65 ~ "senior"),
+    hours_per_week = case_when(hours_per_week <= 25 ~ "part=time",
+                               hours_per_week > 25 & hours_per_week <= 40 ~ "full-time",
+                               hours_per_week > 40 & hours_per_week <= 60~ "over-time",
+                               hours_per_week > 60 ~ "too-much"),
+    capital_gain = case_when(capital_gain == 0 ~ "none",
+                             capital_gain > 0 & capital_gain < max(capital_gain) ~ " low",
+                             capital_gain == max(capital_gain) ~ "high"),
+    capital_loss = case_when(capital_loss == 0 ~ "none",
+                             capital_loss > 0 & capital_loss < max(capital_loss) ~ " low",
+                             capital_loss == max(capital_loss) ~ "high")
+  ) %>% 
+  step_rm(id, education) %>% 
+  step_YeoJohnson(all_numeric())  %>%
+  step_zv(all_predictors())  %>% 
+  step_string2factor(all_nominal()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) 
+```
+
+# Iniciar workflow
+
+```{r}
+adult_workflow <- 
+  workflow() %>% 
+  add_recipe(adult_recipe)
+```
+
+## Validacao Cruzada
+
+```{r}
+set.seed(123)
+adult_vfold <- vfold_cv(training(adult_split), v = 5, strata = resposta)
+
+adult_vfold
+```
+
+## Modelos {.tabset}
+
+### Baseline - Arvore de Decisao
+
+```{r}
+adult_rpart_model <- 
+  decision_tree(
+    min_n = tune(),
+    cost_complexity = tune(), 
+    tree_depth = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+rpart_params <- parameters(
+  min_n(),
+  cost_complexity(), 
+  tree_depth()
+)
+
+set.seed(123)
+rpart_grid <- grid_max_entropy(rpart_params, size = 10)
+
+workflow_adult_rpart_model <- 
+  workflow() %>% 
+  add_model(adult_rpart_model) %>% 
+  add_recipe(adult_recipe)
+
+# ligar processamento paralelo no linux
+doParallel::registerDoParallel(ncores)
+
+rpart_tune <- 
+  workflow_adult_rpart_model %>% 
+  tune_grid(
+    formula = resposta ~.,
+    resamples = adult_vfold,
+    grid = rpart_grid,
+    control = control_grid(save_pred = TRUE, verbose = T, allow_par = T),
+    metrics = metric_set(roc_auc)
+  )
+
+doParallel::stopImplicitCluster()
+
+collect_metrics(rpart_tune) %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, cost_complexity:min_n) %>%
+  pivot_longer(cost_complexity:min_n,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC")
+
+show_best(rpart_tune, "roc_auc")
+
+rpart_best_auc <- select_best(rpart_tune, "roc_auc")
+rpart_best_auc
+
+rpart_workflow_final <- finalize_workflow(
+  workflow_adult_rpart_model,
+  rpart_best_auc
+)
+
+rpart_workflow_final
+
+rpart_workflow_final %>%
+  fit(training(adult_split)) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "col")
+
+rpart_final <- last_fit(rpart_workflow_final, adult_split)
+
+collect_metrics(rpart_final)
+
+```
+
+
+### Final Model - XGBoost
+
+```{r}
+adult_xgb_model <- 
+  boost_tree(
+  trees = 200, learn_rate = tune(), # n arvores e cautela para incluir novas arvores
+  tree_depth = tune(), min_n = tune(), # parametros da arvore
+  loss_reduction = tune(), # gama = 0 arvore complexa, gama = 1 arvore cotoco
+  sample_size = tune(), mtry = tune(), # sorteio linhas/colunas
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost",
+             lambda = 1, # labda = 0 arvore complexa, lambda = 1 arvore toco
+             nthread = 4) # n de nucleos 
+
+adult_xgb_model
+
+xgboost_params <- parameters(
+  learn_rate(),
+  tree_depth(), min_n(), 
+  loss_reduction(),
+  sample_size = sample_prop(), finalize(mtry(), training(adult_split))  
+)
+
+xgboost_params
+
+set.seed(123)
+xgb_grid <- grid_max_entropy(xgboost_params, size = 10)
+
+xgb_grid
+
+workflow_adult_xgb_model <- 
+  workflow() %>% 
+  add_model(adult_xgb_model) %>% 
+  add_recipe(adult_recipe)
+
+workflow_adult_xgb_model
+
+# ligar processamento paralelo no linux
+doParallel::registerDoParallel(ncores)
+
+xgboost_tune <- 
+  workflow_adult_xgb_model %>% 
+  tune_grid(
+    formula = resposta ~., 
+    resamples = adult_vfold,
+    grid = xgb_grid,
+    control = control_grid(save_pred = TRUE, verbose = T, allow_par = T),
+    metrics = metric_set(roc_auc)
+  )
+
+doParallel::stopImplicitCluster()
+
+collect_metrics(xgboost_tune) %>%
+  filter(.metric == "roc_auc") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "AUC")
+
+show_best(xgboost_tune, "roc_auc")
+
+xgbost_best_auc <- select_best(xgboost_tune, "roc_auc")
+xgbost_best_auc
+
+xgboost_workflow_final <- finalize_workflow(
+  workflow_adult_xgb_model,
+  xgbost_best_auc
+)
+
+xgboost_workflow_final
+
+xgboost_workflow_final %>%
+  fit(training(adult_split)) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "col")
+
+xgboost_final <- last_fit(xgboost_workflow_final, adult_split)
+
+collect_metrics(xgboost_final)
+```
+
+# Comparar modelos
+
+```{r}
+bind_rows(
+  rpart_final %>%
+  collect_predictions() %>% 
+  mutate(id = "rpart")
+  ,
+  xgboost_final %>%
+  collect_predictions() %>% 
+  mutate(id = "xgboost")
+) %>% 
+  group_by(id) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  mutate(roc = map(data, ~roc_curve(.x, truth = resposta, `.pred_>50K`)),
+         auc = map_dbl(data, ~roc_auc(.x, truth = resposta, `.pred_>50K`) %>% 
+                         pull(.estimate) %>% round(4)),
+         id = paste0(id, " auc: ", auc)) %>% 
+  select(-data) %>% 
+  unnest(cols = c(roc)) %>% 
+  ggplot() +
+  aes(x = 1 - specificity, y = sensitivity, color = id) +
+  geom_path() +
+  geom_abline(lty = 3)
+```
+
+# Submissao
+
+```{r}
+adult_val <- read_rds("input/adult_val.rds")
+
+xgboost_model_final <- adult_xgb_model %>% 
+    finalize_model(xgbost_best_auc)
+
+adult_fit <- 
+  fit(xgboost_model_final,
+    formula = resposta ~.,  
+    data = bake(prep(adult_recipe), new_data = adult_val))
+
+adult_val$more_than_50k <- 
+  predict(adult_fit, 
+          bake(prep(adult_recipe), new_data = adult_val),
+          type = "prob")$`.pred_>50K`
+
+submissao <- adult_val %>% select(id, more_than_50k)
+
+write_csv(submissao, "submissao.csv")
+
+```
+
+

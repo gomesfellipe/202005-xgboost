@@ -17,24 +17,81 @@ library(DataExplorer)
 ncores <- 3
 ```
 
-```{r}
-adult <- readr::read_rds("input/adult.rds")
+# Definição do problema
 
-adult
-# DataExplorer::create_report(data = adult, y = "resposta", output_file = " report_before.Rmd")
+Descrição obtida do link do datset: [Adult Data Set](http://archive.ics.uci.edu/ml/datasets/Adult)
+
+<http://archive.ics.uci.edu/ml/datasets/Adult>
+<https://www.rdocumentation.org/packages/arules/versions/1.6-5/topics/Adult>
+
+Resumo: Prever se a renda excede US$50 mil/ano com base nos dados do censo. Também conhecido como conjunto de dados "Renda do Censo".
+
+## Informações do conjunto de dados:
+
+A extração foi feita por Barry Becker do banco de dados do Censo de 1994. Um conjunto de registros razoavelmente limpos foi extraído usando as seguintes condições: ((AAGE> 16) && (AGI> 100) && (AFNLWGT> 1) && (HRSWK> 0))
+
+A tarefa de previsão é determinar se uma pessoa faz mais de 50 mil a ano.
+
+## Informações sobre atributos:
+
+Listagem de atributos (traduzido livremente):
+
+| feature | descrição|
+|--:|--:|
+|idade| contínua|
+|classe de trabalho| Particular, Auto-emp-não-inc, Auto-emp-inc, Federal-gov, Local-gov, State-gov, Sem salário, Nunca trabalhou|
+|fnlwgt| contínuo|
+|educação| Bacharelado, Ensino Médio, 11º, Ensino Médio, Prof-escola, Assoc-acdm, Assoc-voc, 9º, 7º-8º, 12º, Mestrado, 1º-4º, 10º, Doutorado, 5º-6º, Pré-Escola|
+|número da educação| contínuo|
+|Estado civil| cônjuge civil, divorciado, nunca casado, separado, viúvo, cônjuge ausente, cônjuge afetivo|
+|ocupação| Suporte técnico, Reparação de ofícios, Outros serviços, Vendas, Gerenciamento executivo, Especialidade prof, Limpadores de manipuladores, Inspeção de máquinas, Adm-administrativo, Agricultura, Pesca, Movimentação de transportes, Casa particular serviço, serviço protetor, forças armadas|
+Relacionamento| Esposa, Filho próprio, Marido, "Não família", Outro parente, Solteiro|
+|raça| branco, asiático-pac-islander, amer-indian-esquimó, outros, preto|
+|sexo| Feminino, Masculino|
+|ganho de capital| contínuo|
+|perda de capital| contínua|
+|horas por semana| contínua|
+|país de origem| Estados Unidos, Camboja, Inglaterra, Porto Rico, Canadá, Alemanha, Estados Unidos (Guam-USVI-etc), Índia, Japão, Grécia, Sul, China, Cuba, Irã, Honduras, Filipinas, Itália , Polônia, Jamaica, Vietnã, México, Portugal, Irlanda, França, República Dominicana, Laos, Equador, Taiwan, Haiti, Colômbia, Hungria, Guatemala, Nicarágua, Escócia, Tailândia, Iugoslávia, El-Salvador, Trinadad e Tobago, |Peru, Hong , Holanda - Holanda|
+
+# Dados disponíveis
+
+```{r}
+adult <- readr::read_rds("input/adult.rds") %>% 
+  mutate(resposta = factor(resposta, levels = c(">50K", "<=50K")))
+
+adult_val <- readr::read_rds("input/adult_val.rds")
 ```
+
+Estrutura geral dos dados:
+
+```{r}
+DataExplorer::plot_intro(adult)
+```
+
+Quantidade parecida de colunas contínuas e discretas semelhante e uma pequena quantidade de dados faltantes.
+
+## Análise exploratória dos dados
+
+Os insights iniciais para a análise exploratória foram obtidos ao examinar o *report* gerado pela função a baixo:
+
+```{r, eval = F}
+DataExplorer::create_report(data = adult, y = "resposta", output_file = " report_before.Rmd")
+```
+
+## Train/Test
+
+Dividindo os dados em 80/20:
 
 ```{r}
 set.seed(32)
 adult_split <- initial_split(adult, prop = 0.8, strata = resposta)
-
-adult_train <- training(adult_split)
-adult_test <- testing(adult_split)
 ```
+
+## Préprocessamento com Recipes
 
 ```{r}
 adult_recipe <- 
-  recipe(resposta ~ ., adult_train)%>% 
+  recipe(resposta ~ ., training(adult_split)) %>% 
   step_mutate(
     # fix na
     native_country = case_when(native_country == "United-States" ~ "USA",
@@ -61,143 +118,21 @@ adult_recipe <-
   ) %>% 
   step_rm(id, education) %>% 
   step_YeoJohnson(all_numeric())  %>%
-  step_zv(all_predictors())  %>% 
-  step_string2factor(all_nominal()) %>%
-  step_dummy(all_nominal(), -all_outcomes()) 
+  step_zv(all_predictors()) #%>% 
+  # step_smote(resposta)
 
-# adult_recipe
-# baked_train <- bake(prep(adult_recipe), adult_train)
-# 
-# 
-# 
-# xgboost::xgboost(as.matrix(select(baked_train, -resposta)),
-#                  baked_train$resposta, nrounds = 10)
+# bake(prep(adult_recipe), adult)
+
+adult_workflow <- workflow() %>% add_recipe(adult_recipe)
 ```
+
+## Preparar validacao cruzada
 
 ```{r}
-set.seed(123)
-adult_vfold <- vfold_cv(training(adult_split), v = 2, strata = resposta)
-
-adult_vfold
+set.seed(42)
+adult_resamples <- vfold_cv(training(adult_split), v = 5)
 ```
 
-
-```{r}
-xgb_base <- 
-  boost_tree(
-  trees = 100, learn_rate = tune(), # n arvores e cautela para incluir novas arvores
-  tree_depth = tune(), min_n = tune(), # parametros da arvore
-  loss_reduction = tune(), # gama = 0 arvore complexa, gama = 1 arvore cotoco
-  sample_size = tune(), mtry = tune(), # sorteio linhas/colunas
-  ) %>% 
-  set_mode("classification") %>% 
-  set_engine("xgboost",
-             lambda = 1, # labda = 0 arvore complexa, lambda = 1 arvore toco
-             nthread = 4) # n de nucleos 
-
-xgb_base
-```
-
-```{r}
-xgboost_params <- parameters(
-  learn_rate(),
-  tree_depth(), min_n(), 
-  loss_reduction(),
-  sample_size = sample_prop(), finalize(mtry(), training(adult_split))  
-)
-
-xgboost_params
-```
-
-```{r}
-xgb_grid <- grid_max_entropy(xgboost_params, size = 3)
-
-xgb_grid
-```
-
-
-```{r}
-workflow_xgb_base <- 
-  workflow() %>% 
-  add_model(xgb_base) %>% 
-  add_recipe(adult_recipe)
-
-workflow_xgb_base
-```
-
-```{r}
-# ligar processamento paralelo no linux
-doParallel::registerDoParallel(ncores)
-
-xgboost_tune <- 
-  workflow_xgb_base %>% 
-  tune_grid(
-    resamples = adult_vfold,
-    grid = xgb_grid,
-    control = control_grid(save_pred = TRUE, verbose = TRUE, allow_par = T),
-    metrics = metric_set(roc_auc)
-  )
-
-doParallel::stopImplicitCluster()
-```
-
-
-```{r}
-collect_metrics(xgboost_tune) %>%
-  filter(.metric == "roc_auc") %>%
-  select(mean, mtry:sample_size) %>%
-  pivot_longer(mtry:sample_size,
-               values_to = "value",
-               names_to = "parameter"
-  ) %>%
-  ggplot(aes(value, mean, color = parameter)) +
-  geom_point(alpha = 0.8, show.legend = FALSE) +
-  facet_wrap(~parameter, scales = "free_x") +
-  labs(x = NULL, y = "AUC")
-```
-
-```{r}
-show_best(xgboost_tune, "roc_auc")
-
-best_auc <- select_best(xgboost_tune, "roc_auc")
-best_auc
-
-xgboost_workflow_final <- finalize_workflow(
-  workflow_xgb_base,
-  best_auc
-)
-
-xgboost_workflow_final
-```
-
-```{r}
-library(vip)
-
-xgboost_workflow_final %>%
-  fit(training(adult_split)) %>%
-  pull_workflow_fit() %>%
-  vip(geom = "col")
-```
-
-
-```{r}
-xgboost_final <- last_fit(xgboost_workflow_final, adult_split)
-
-collect_metrics(xgboost_final)
-
-xgboost_final %>%
-  collect_predictions() %>%
-  roc_curve(resposta, `.pred_>50K`) %>%
-  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
-  geom_line(size = 1.5, color = "midnightblue") +
-  geom_abline(
-    lty = 2, alpha = 0.5,
-    color = "gray50",
-    size = 1.2
-  )
-```
-
-<!-- Daqui para baixo é tudo rascunho -->
 
 # Modelos Baseline
 
@@ -224,10 +159,10 @@ adult_rf_workflow <-adult_workflow %>% add_model(adult_rf_model)
 ```
 
 ```{r}
-my_tune_grid <- function(workflow, adult_vfold, grid = 3) {
+my_tune_grid <- function(workflow, adult_resamples, grid = 3) {
   tune_grid(
     workflow,
-    resamples = adult_vfold,
+    resamples = adult_resamples,
     grid = grid,
     metrics = metric_set(accuracy, precision, recall, roc_auc),
     control = control_grid(verbose = TRUE, allow_par = TRUE, save_pred = TRUE)
@@ -240,15 +175,15 @@ my_tune_grid <- function(workflow, adult_vfold, grid = 3) {
 doParallel::registerDoParallel(ncores)
 
 tictoc::tic("knn")
-adult_knn_tune_grid <- my_tune_grid(adult_knn_workflow, adult_vfold)
+adult_knn_tune_grid <- my_tune_grid(adult_knn_workflow, adult_resamples)
 tictoc::toc()
 
 tictoc::tic("tree")
-adult_tree_tune_grid <- my_tune_grid(adult_tree_workflow, adult_vfold)
+adult_tree_tune_grid <- my_tune_grid(adult_tree_workflow, adult_resamples)
 tictoc::toc()
 
 tictoc::tic("rf")
-adult_rf_tune_grid <- my_tune_grid(adult_rf_workflow, adult_vfold)
+adult_rf_tune_grid <- my_tune_grid(adult_rf_workflow, adult_resamples)
 tictoc::toc()
 
 doParallel::stopImplicitCluster()
@@ -340,7 +275,7 @@ bind_rows(
 ## Preparar para validacao cruzada
 
 ```{r, eval = F}
-adult_vfold <- vfold_cv(training(spl), v = 10, strata = resposta)
+rspls <- vfold_cv(training(spl), v = 10, strata = resposta)
 ```
 
 # Modelagem
@@ -480,7 +415,7 @@ wfl <-
 tun <- 
   wfl %>% 
     tune_grid(
-     resamples = adult_vfold,
+     resamples = rspls,
      control = control_grid(save_pred = TRUE, verbose = TRUE),
      metrics = metric_set(roc_auc)
     )
@@ -522,7 +457,7 @@ wfl <- workflow() %>%
 tun <- 
   wfl %>% 
     tune_grid(
-     resamples = adult_vfold,
+     resamples = rspls,
      control = control_grid(save_pred = TRUE, verbose = TRUE),
      metrics = metric_set(roc_auc)
     )
