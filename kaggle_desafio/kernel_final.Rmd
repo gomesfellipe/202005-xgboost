@@ -1,72 +1,188 @@
+---
+title: "Desafio do Workshop de XGBoost da curso-R"
+author: "Fellipe Gomes"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    number_sections: true
+---
+
+<style>
+.column {
+  float: left;
+  width: 50%;
+  padding: 10px;
+}
+
+.column4 {
+  float: left;
+  width: 33%;
+  padding: 10px;
+}
+
+.column8 {
+  float: left;
+  width: 66%;
+  padding: 10px;
+}
+
+.column5 {
+  float: left;
+  width: 40%;
+  padding: 10px;
+}
+
+.column7 {
+  float: left;
+  width: 60%;
+  padding: 10px;
+}
+
+.row:after {
+  content: "";
+  display: table;
+  clear: both;
+}
+</style>
+<link rel="stylesheet" href="https://www.w3schools.com/w3css/4/w3.css">
+
+<p align="right"><span style="color:firebrick">Se você gostou do Kernel não esqueça de deixar um upvote! <i class="fas fa-hand-peace"></i></span> </p>
+
+Carregar dependência:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, fig.width = 11, warning = F, error = F, message = F)
 
-library(tidyverse) # metapackage of all tidyverse packages
+library(tidyverse)
 library(tidymodels)
-library(themis) # step smote
-library(DataExplorer)
 library(vip)
 
 # número de processadores para paralelizar
 ncores <- 4
 ```
 
+```{r, eval = F}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 11, warning = F, error = F, message = F)
+
+library(tidyverse)
+library(tidymodels)
+library(vip)
+
+# número de processadores para paralelizar
+ncores <- 4
+```
+
+# Definindo o problema
+
+Este kernel tem como objetivo praticas o ajuste do modelo [xgboost: eXtreme Gradient Boosting](https://xgboost.ai/) utilizando o framework [tidymodels](https://www.tidymodels.org/).
+
+<div class="row">
+<div class="column">
+</br></br>
+<center>
+![](https://upload.wikimedia.org/wikipedia/commons/6/69/XGBoost_logo.png){width=50%}
+</center>
+</div>
+<div class="column">
+<left>
+![](https://avatars3.githubusercontent.com/u/29100987?s=280&v=4){width=50%}
+</left>
+</div>
+</div>
+<div class="row">
+<div class="column">
+<center><small>Fonte: https://xgboost.ai/</small></center>
+</div>
+<div class="column">
+<left><small>Fonte: https://www.tidymodels.org/</small></left>
+</div>
+</div>
+
 # Leitura dos dados
 
-```{r}
-adult <- readr::read_rds("input/adult.rds")
+## Informações sobre os dados
 
+Listagem de atributos (traduzido livremente):
+
+| feature | descrição|
+|:--|--:|
+|idade| contínua|
+|classe de trabalho| Particular, Auto-emp-não-inc, Auto-emp-inc, Federal-gov, Local-gov, State-gov, Sem salário, Nunca trabalhou|
+|fnlwgt| contínuo|
+|educação| Bacharelado, Ensino Médio, 11º, Ensino Médio, Prof-escola, Assoc-acdm, Assoc-voc, 9º, 7º-8º, 12º, Mestrado, 1º-4º, 10º, Doutorado, 5º-6º, Pré-Escola|
+|número da educação| contínuo|
+|Estado civil| cônjuge civil, divorciado, nunca casado, separado, viúvo, cônjuge ausente, cônjuge afetivo|
+|ocupação| Suporte técnico, Reparação de ofícios, Outros serviços, Vendas, Gerenciamento executivo, Especialidade prof, Limpadores de manipuladores, Inspeção de máquinas, Adm-administrativo, Agricultura, Pesca, Movimentação de transportes, Casa particular serviço, serviço protetor, forças armadas|
+Relacionamento| Esposa, Filho próprio, Marido, "Não família", Outro parente, Solteiro|
+|raça| branco, asiático-pac-islander, amer-indian-esquimó, outros, preto|
+|sexo| Feminino, Masculino|
+|ganho de capital| contínuo|
+|perda de capital| contínua|
+|horas por semana| contínua|
+|país de origem| Estados Unidos, Camboja, Inglaterra, Porto Rico, Canadá, Alemanha, Estados Unidos (Guam-USVI-etc), Índia, Japão, Grécia, Sul, China, Cuba, Irã, Honduras, Filipinas, Itália , Polônia, Jamaica, Vietnã, México, Portugal, Irlanda, França, República Dominicana, Laos, Equador, Taiwan, Haiti, Colômbia, Hungria, Guatemala, Nicarágua, Escócia, Tailândia, Iugoslávia, El-Salvador, Trinadad e Tobago, |Peru, Hong , Holanda - Holanda|
+
+## Leitura dos dados disponíveis
+
+Leitura conjunto de dados que serão utilizados para treinar o modelo:
+
+```{r}
+adult <- readRDS("input/adult.rds")
 adult
 ```
 
-# Separar em treino e teste:
+A base possui `r nrow(adult)` linhas e `r ncol(adult)` colunas.
+
+# Framework tidymodels
+
+Aplicaremos a seguir o framework tidymodels
+
+## Amostragem
+
+Separar os dados em treino e teste:
 
 ```{r}
 set.seed(32)
 adult_split <- initial_split(adult, prop = 0.8, strata = resposta)
-
-adult_train <- training(adult_split)
-adult_test <- testing(adult_split)
 ```
 
-# Pre-processamento
+## Pré-processamento
+
+Todo o tratamento dos dados será armazenado em uma "receita" de forma que este objeto possa ser executado tanto na hora do treinamento do modelo quanto na hora de testar para submissão.
+
+Obs.: Todos os insights para transformações nos dados foram avaliados após a inspeção do relatório automático desenvolvido utilizando a função `DataExplorer::create_report()` do pacote [`DataExplorer`](https://cran.r-project.org/web/packages/DataExplorer/vignettes/dataexplorer-intro.html)
 
 ```{r}
-adult_recipe <- 
-  recipe(resposta ~ ., adult_train)%>% 
-  step_mutate(
-    # fix na
-    native_country = case_when(native_country == "United-States" ~ "USA",
-                               TRUE ~ "other"),
-    occupation = case_when(is.na(occupation) ~ "Unemployed",
-                           TRUE ~ as.character(occupation)),
-    workclass = case_when(is.na(workclass) ~ "Unemployed",
-                          TRUE ~ as.character(workclass)),
-    # categorize
-    age = case_when(age <= 25 ~ "young",
-                    age > 25 & age <= 45 ~ "middle-aged",
-                    age > 45 & age <= 65 ~ "senior",
-                    age > 65 ~ "senior"),
-    hours_per_week = case_when(hours_per_week <= 25 ~ "part=time",
-                               hours_per_week > 25 & hours_per_week <= 40 ~ "full-time",
-                               hours_per_week > 40 & hours_per_week <= 60~ "over-time",
-                               hours_per_week > 60 ~ "too-much"),
-    capital_gain = case_when(capital_gain == 0 ~ "none",
-                             capital_gain > 0 & capital_gain < max(capital_gain) ~ " low",
-                             capital_gain == max(capital_gain) ~ "high"),
-    capital_loss = case_when(capital_loss == 0 ~ "none",
-                             capital_loss > 0 & capital_loss < max(capital_loss) ~ " low",
-                             capital_loss == max(capital_loss) ~ "high")
-  ) %>% 
+ adult_recipe <- 
+  training(adult_split) %>% 
+  recipe(resposta ~ .) %>% 
   step_rm(id, education) %>% 
-  step_YeoJohnson(all_numeric())  %>%
-  step_zv(all_predictors())  %>% 
+  step_mutate(
+    native_country = case_when(
+      native_country == "United-States" ~ "USA",
+      TRUE ~ "other"),
+    occupation = case_when(
+      is.na(occupation) ~ "Unemployed",
+      TRUE ~ as.character(occupation)),
+    workclass = case_when(
+      is.na(workclass) ~ "Unemployed",
+      TRUE ~ as.character(workclass)),
+    capital = capital_gain + capital_loss
+  ) %>% 
+  step_rm(capital_gain, capital_loss)%>% 
   step_string2factor(all_nominal()) %>%
-  step_dummy(all_nominal(), -all_outcomes()) 
+  step_log(fnlwgt, age) %>%
+  step_normalize(fnlwgt, age) %>%
+  step_zv(all_predictors()) %>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_dummy(all_nominal(), -all_outcomes())
+
+# bake(prep(adult_recipe), training(adult_split))
 ```
 
-# Iniciar workflow
+Após definir todo o tratamento podemos dar inicio ao `workflow`:
 
 ```{r}
 adult_workflow <- 
@@ -74,18 +190,26 @@ adult_workflow <-
   add_recipe(adult_recipe)
 ```
 
-## Validacao Cruzada
+## Validação Cruzada
+
+Agora que nossos dados já foram divididos em treino e teste e já temos a "receita", vamos especificar como será a validação cruzada:
 
 ```{r}
 set.seed(123)
 adult_vfold <- vfold_cv(training(adult_split), v = 5, strata = resposta)
-
 adult_vfold
 ```
 
-## Modelos {.tabset}
+## Especificações dos Modelos {.tabset}
 
-### Baseline - Arvore de Decisao
+Os dois modelos que serão ajustados:
+
+  * `rpart`: Ajuste de uma árvore (baseline)
+  * `xgboost`: Combinação do ajuste de várias árvores
+
+### Baseline - Árvore de Decisão
+
+Definindo o modelo:
 
 ```{r}
 adult_rpart_model <- 
@@ -95,36 +219,64 @@ adult_rpart_model <-
     tree_depth = tune()) %>%
   set_mode("classification") %>%
   set_engine("rpart")
+adult_rpart_model
+```
 
+Definir parâmetros para tuning:
+
+```{r}
 rpart_params <- parameters(
   min_n(),
   cost_complexity(), 
   tree_depth()
 )
+rpart_params
+```
 
+**Montar grade de pesquisa**
+
+Alguns métodos para pesquisa em grade são fornecidos pelo pacote `dials`, para ajustar este modelo baseline utilizaremos o `grid_max_entropy()`:
+
+```{r}
 set.seed(123)
-rpart_grid <- grid_max_entropy(rpart_params, size = 10)
+rpart_grid <- grid_max_entropy(rpart_params, size = 20) # local=5 , kaggle=20
+```
 
+Uma representação gráfica da grade:
+
+```{r}
+plotly::plot_ly(rpart_grid, x = ~min_n, y = ~cost_complexity, z = ~tree_depth,
+                type = "scatter3d", mode = "markers")
+```
+
+Preparar workflow para `rpart`:
+
+```{r}
 workflow_adult_rpart_model <- 
-  workflow() %>% 
-  add_model(adult_rpart_model) %>% 
-  add_recipe(adult_recipe)
+  adult_workflow %>% 
+  add_model(adult_rpart_model)
+```
 
-# ligar processamento paralelo no linux
+Tuning do modelo:
+
+```{r}
 doParallel::registerDoParallel(ncores)
 
 rpart_tune <- 
   workflow_adult_rpart_model %>% 
   tune_grid(
-    formula = resposta ~.,
     resamples = adult_vfold,
     grid = rpart_grid,
-    control = control_grid(save_pred = TRUE, verbose = T, allow_par = T),
-    metrics = metric_set(roc_auc)
+    control = control_grid(save_pred = TRUE, verbose = F, allow_par = T),
+    metrics = metric_set(roc_auc, accuracy, precision, recall)
   )
 
 doParallel::stopImplicitCluster()
+```
 
+Como cada métrica se saiu nos ajustes:
+
+```{r, fig.height=5}
 collect_metrics(rpart_tune) %>%
   filter(.metric == "roc_auc") %>%
   select(mean, cost_complexity:min_n) %>%
@@ -136,119 +288,152 @@ collect_metrics(rpart_tune) %>%
   geom_point(alpha = 0.8, show.legend = FALSE) +
   facet_wrap(~parameter, scales = "free_x") +
   labs(x = NULL, y = "AUC")
+```
 
-show_best(rpart_tune, "roc_auc")
+Melhor combinação:
 
-rpart_best_auc <- select_best(rpart_tune, "roc_auc")
+```{r}
+show_best(rpart_tune, "roc_auc") # top 5
+rpart_best_auc <- select_best(rpart_tune, "roc_auc") # melhor de todos
 rpart_best_auc
+```
 
+Finalizar workflow:
+
+```{r}
 rpart_workflow_final <- finalize_workflow(
   workflow_adult_rpart_model,
   rpart_best_auc
 )
-
 rpart_workflow_final
+```
 
+Atributos mais importantes no ajuste do modelo:
+
+```{r}
 rpart_workflow_final %>%
   fit(training(adult_split)) %>%
   pull_workflow_fit() %>%
   vip(geom = "col")
+```
 
+Finalizar modelo:
+
+```{r}
 rpart_final <- last_fit(rpart_workflow_final, adult_split)
-
 collect_metrics(rpart_final)
-
 ```
 
 
 ### Final Model - XGBoost
 
+Definir modelo
+
 ```{r}
 adult_xgb_model <- 
   boost_tree(
-  trees = 200, learn_rate = tune(), # n arvores e cautela para incluir novas arvores
+  trees = tune(), learn_rate = tune(), # n arvores e cautela para incluir novas arvores
   tree_depth = tune(), min_n = tune(), # parametros da arvore
   loss_reduction = tune(), # gama = 0 arvore complexa, gama = 1 arvore cotoco
   sample_size = tune(), mtry = tune(), # sorteio linhas/colunas
   ) %>% 
   set_mode("classification") %>% 
   set_engine("xgboost",
-             lambda = 1, # labda = 0 arvore complexa, lambda = 1 arvore toco
-             nthread = 4) # n de nucleos 
-
+              lambda = 0,
+             nthread = ncores) # n de nucleos 
 adult_xgb_model
+```
 
+Definir parâmetros para tuning:
+
+```{r}
 xgboost_params <- parameters(
-  learn_rate(),
+  trees(), learn_rate(),
   tree_depth(), min_n(), 
   loss_reduction(),
   sample_size = sample_prop(), finalize(mtry(), training(adult_split))  
 )
-
+# diminuir tempo de processamento local:
+xgboost_params <- xgboost_params %>% update(trees = trees(c(100, 500))) 
+# tunar lambda:
+# xgboost_params <- xgboost_params %>% update(lambda = dials::penalty())
+                                            
 xgboost_params
+```
 
-set.seed(123)
-xgb_grid <- grid_max_entropy(xgboost_params, size = 10)
+Preparar workflow para `xgboost`
 
-xgb_grid
-
+```{r}
 workflow_adult_xgb_model <- 
   workflow() %>% 
   add_model(adult_xgb_model) %>% 
   add_recipe(adult_recipe)
-
 workflow_adult_xgb_model
+```
 
-# ligar processamento paralelo no linux
+Note que neste caso nao definimos um grid pois não utilizaremos o `tune_grid`. O tuning deste modelo será realizado utilizado [otimização bayesiana iterativa](https://www.tidymodels.org/learn/work/bayes-opt/) com a função `tune_bayes()`.
+
+```{r}
 doParallel::registerDoParallel(ncores)
 
-xgboost_tune <- 
-  workflow_adult_xgb_model %>% 
-  tune_grid(
-    formula = resposta ~., 
+set.seed(321)
+xgboost_tune <-
+  workflow_adult_xgb_model %>%
+  tune_bayes(
     resamples = adult_vfold,
-    grid = xgb_grid,
-    control = control_grid(save_pred = TRUE, verbose = T, allow_par = T),
-    metrics = metric_set(roc_auc)
+    param_info = xgboost_params,
+    # initial = ?,
+    iter = 10,  # local=10, kaggle=100
+    metrics = metric_set(roc_auc, accuracy, precision, recall),
+    control = control_bayes(no_improve = 5,  # local=5, kaggle=30
+                            save_pred = T, verbose = F)
   )
 
 doParallel::stopImplicitCluster()
+```
 
-collect_metrics(xgboost_tune) %>%
-  filter(.metric == "roc_auc") %>%
-  select(mean, mtry:sample_size) %>%
-  pivot_longer(mtry:sample_size,
-               values_to = "value",
-               names_to = "parameter"
-  ) %>%
-  ggplot(aes(value, mean, color = parameter)) +
-  geom_point(alpha = 0.8, show.legend = FALSE) +
-  facet_wrap(~parameter, scales = "free_x") +
-  labs(x = NULL, y = "AUC")
+Como cada métrica se saiu nos ajustes:
 
+```{r}
+autoplot(xgboost_tune)
+```
+
+Melhor combinação:
+
+```{r}
 show_best(xgboost_tune, "roc_auc")
-
 xgbost_best_auc <- select_best(xgboost_tune, "roc_auc")
 xgbost_best_auc
+```
 
+Finalizar workflow:
+
+```{r}
 xgboost_workflow_final <- finalize_workflow(
   workflow_adult_xgb_model,
-  xgbost_best_auc
-)
-
+  xgbost_best_auc)
 xgboost_workflow_final
+```
 
+Atributos mais importantes no ajuste do modelo:
+
+```{r}
 xgboost_workflow_final %>%
   fit(training(adult_split)) %>%
   pull_workflow_fit() %>%
   vip(geom = "col")
+```
 
+Finalizar modelo:
+
+```{r}
 xgboost_final <- last_fit(xgboost_workflow_final, adult_split)
-
 collect_metrics(xgboost_final)
 ```
 
 # Comparar modelos
+
+Como a métrica ara avaliação da competição será a *Area Under Receiver Operating Characteristic Curve*, vamos avaliar as curvas ROC junto às medias AUC:
 
 ```{r}
 bind_rows(
@@ -275,10 +460,12 @@ bind_rows(
   geom_abline(lty = 3)
 ```
 
-# Submissao
+# Submissão
+
+Preparar dados para submissão:
 
 ```{r}
-adult_val <- read_rds("input/adult_val.rds")
+adult_val <- readr::read_rds("input/adult_val.rds")
 
 xgboost_model_final <- adult_xgb_model %>% 
     finalize_model(xgbost_best_auc)
@@ -286,17 +473,42 @@ xgboost_model_final <- adult_xgb_model %>%
 adult_fit <- 
   fit(xgboost_model_final,
     formula = resposta ~.,  
-    data = bake(prep(adult_recipe), new_data = adult_val))
+    data = bake(prep(adult_recipe), new_data = adult))
 
 adult_val$more_than_50k <- 
   predict(adult_fit, 
           bake(prep(adult_recipe), new_data = adult_val),
           type = "prob")$`.pred_>50K`
+```
 
-submissao <- adult_val %>% select(id, more_than_50k)
+Matriz de confusão do pacote `caret`:
 
-write_csv(submissao, "submissao.csv")
+mais informações sobre as métricas na [documentação do pacote](https://topepo.github.io/caret/measuring-performance.html)
 
+```{r}
+adult_val %>% 
+  transmute(resposta = factor(resposta, levels = c(">50K", "<=50K")), 
+            more_than_50k = ifelse(more_than_50k > 0.5, ">50K", "<=50K") %>% 
+              factor(levels = c(">50K", "<=50K"))) %>% 
+  table() %>% 
+  caret::confusionMatrix()
 ```
 
 
+```{r}
+submissao <- adult_val %>% select(id, more_than_50k)
+readr::write_csv(submissao, "submissao.csv")
+```
+
+# Referências
+
+Alguns links úteis na contrução deste kernel:
+
+  * <https://xgboost.ai/>
+  * <https://www.kaggle.com/c/curso-r-workshop-xgboost>
+  * <https://rviews.rstudio.com/2019/06/19/a-gentle-intro-to-tidymodels/>
+  * <https://juliasilge.com/blog/xgboost-tune-volleyball/>
+  * <https://www.tidymodels.org/learn/work/bayes-opt/>
+  * <https://www.business-science.io/code-tools/2020/01/21/hyperparamater-tune-product-price-prediction.html>
+  
+  

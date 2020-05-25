@@ -19,10 +19,10 @@ ncores <- 3
 
 # Definição do problema
 
-Descrição obtida do link do datset: [Adult Data Set](http://archive.ics.uci.edu/ml/datasets/Adult)
+Para mais informações sobre o conjunto de dados utilizados consulte: 
 
-<http://archive.ics.uci.edu/ml/datasets/Adult>
-<https://www.rdocumentation.org/packages/arules/versions/1.6-5/topics/Adult>
+  * <http://archive.ics.uci.edu/ml/datasets/Adult>
+  * <https://www.rdocumentation.org/packages/arules/versions/1.6-5/topics/Adult>
 
 Resumo: Prever se a renda excede US$50 mil/ano com base nos dados do censo. Também conhecido como conjunto de dados "Renda do Censo".
 
